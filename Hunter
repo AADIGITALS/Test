@@ -174,30 +174,36 @@
   // ==================
   // <-- FIX: This function now reloads the entire page.
   // ==================
-  function autoReloadForToken(intervalMin) {
-    if (tokenRefreshInterval) clearInterval(tokenRefreshInterval); // Clear old timer
-    const interval = intervalMin * 60 * 1000;
-    log(`🔄 Page will reload to refresh token in ${intervalMin} min.`);
 
-    tokenRefreshInterval = setInterval(() => {
-      log('⏳ Reloading page to refresh token...');
 
-      // Add a visual overlay
-      const overlay = document.createElement('div');
-      overlay.style.cssText = `
-        position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-        background: rgba(0, 0, 0, 0.75); z-index: 9999998;
-        display: flex; align-items: center; justify-content: center;
-        font-size: 24px; color: white; font-weight: bold;
-      `;
-      overlay.textContent = '🔄 Reloading for new Token...';
-      document.body.append(overlay);
+function autoReloadForToken(intervalMin) {
+  if (tokenRefreshInterval) clearInterval(tokenRefreshInterval);
+  const interval = intervalMin * 60 * 1000;
 
-      // 'hunterWasRunning' flag is already set, so it will auto-restart
+  log(`🔄 Page will reload to refresh token in ${intervalMin} min.`);
+
+  tokenRefreshInterval = setInterval(() => {
+    log('⏳ Reloading page to refresh token...');
+
+    const overlay = document.createElement('div');
+    overlay.style.cssText = `
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0,0,0,0.75); color: white;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 24px; font-weight: bold; z-index: 9999999;
+    `;
+    overlay.textContent = '🔄 Refreshing session...';
+    document.body.appendChild(overlay);
+
+    // Small delay so overlay is visible before reload happens
+    setTimeout(() => {
       location.reload();
-    }, interval);
-  }
+    }, 600);
 
+  }, interval);
+}
+
+autoReloadForToken(6); // example// example
   // ==================
   // <-- FIX: Scheduler logic updated to loop every minute.
   // ==================
