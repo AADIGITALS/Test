@@ -644,13 +644,15 @@ if (saved.times && saved.times.length) {
   // ================== 🚀 Init ==================
   // ================== 🚀 Init ==================
 
-  // ================== 🚀 Init ==================
-
-// ================== 🚀 Init ==================
-   window.addEventListener('load', () => {
+  /**
+   * Main function to build the UI and start the script.
+   * This is now 'idempotent', meaning it can be called multiple times
+   * without creating duplicate UIs.
+   */
+     window.addEventListener('load', () => {
     retrieveToken();
     createUI();
 
-    log('✨ Ready: Stable Visa Scheduler v19.7 — Auto Token Refresh ');
+    log('✨ Ready: Stable Visa Scheduler v19.7 — Auto Token Refresh (8 min)');
   });
 })();
