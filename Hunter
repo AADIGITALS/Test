@@ -5,6 +5,7 @@
 // @description  Stable Visa Hunter with automatic PAGE RELOAD, auto-restart, and scheduler loop fix.
 // @match        *://*.almaviva-visa.it/*
 // @grant        none
+// @run-at       document-idle
 // ==/UserScript==
 
 (function () {
@@ -291,8 +292,35 @@ function scheduleNext(visaType) {
     }
   }
   // ================== 🧰 UI ==================
+  // ================== 🧰 UI ==================
   function createUI() {
-    const saved = JSON.parse(localStorage.getItem('visaScheduler') || '{}');
+    // ==================
+    // <-- NEW: First-run check logic
+    // ==================
+    const firstRunFlag = 'yallaVisa_v19_6_init'; // Flag specific to this version
+    const isFirstRun = !localStorage.getItem(firstRunFlag);
+    let saved = {}; // Start with an empty object
+
+    if (isFirstRun) {
+      // This is the first time v19.6 is running.
+      log('✨ First run of v19.6. Loading default settings.');
+
+      // Clear any old settings from previous versions
+      localStorage.removeItem('visaScheduler');
+
+      // Set the flag so this block doesn't run again
+      localStorage.setItem(firstRunFlag, 'true');
+
+      // 'saved' remains '{}', which will force all defaults to load
+    } else {
+      // Not the first time, load saved data as usual.
+      saved = JSON.parse(localStorage.getItem('visaScheduler') || '{}');
+    }
+    // ==================
+    // <-- END NEW
+    // ==================
+
+    // const saved = JSON.parse(localStorage.getItem('visaScheduler') || '{}'); // <-- OLD LINE (REPLACED)
 
     const panel = document.createElement('div');
     panel.style.cssText = `
@@ -457,7 +485,7 @@ updateAttemptCounter();
       timeContainer.style.display = timeContainer.style.display === 'none' ? 'block' : 'none';
     };
 
- function addTimeRow(time = '', retry = 1) {
+  function addTimeRow(time = '', retry = 1) {
       const row = document.createElement('div');
       row.className = 'time-row';
       row.style.cssText = 'display:flex;align-items:center;margin-bottom:4px;';
@@ -480,12 +508,25 @@ updateAttemptCounter();
     }
 
 
-    if (saved.times && saved.times.length) {
-      saved.times.forEach(t => addTimeRow(t.time, t.retry));
-    } else {
-      ['04:58:000', '09:58:250', '14:58:750'].forEach(t => addTimeRow(t, 1));
-    }
-
+if (saved.times && saved.times.length) {
+  saved.times.forEach(t => addTimeRow(t.time, t.retry));
+} else {
+  [
+    '59:59:000',
+    '04:59:000',
+    '09:59:000',
+    '14:59:000',
+    '19:59:000',
+    '24:59:000',
+    '29:59:000',
+    '34:59:000',
+    '39:59:000',
+    '44:59:000',
+    '49:59:000',
+    '54:59:000'
+  
+  ].forEach(t => addTimeRow(t, 1));
+}
 
     const addBtn = document.createElement('button');
     addBtn.textContent = '➕ Add Timing';
