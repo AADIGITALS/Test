@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Yalla-Visa v19.6 (Page Reload Fix)
+// @name         Yalla-Visa v20.6 — Fixed Timer + Smooth Glass UI + Latency Monitor
 // @namespace    http://tampermonkey.net/
-// @version      19.6
-// @description  Stable Visa Hunter with automatic PAGE RELOAD, auto-restart, and scheduler loop fix.
+// @version      20.6
+// @description  Fixed timer accuracy + smooth UI + latency tracking + persistent settings.
 // @match        *://*.almaviva-visa.it/*
 // @grant        none
 // @run-at       document-idle
@@ -16,242 +16,15 @@
   let schedule = [];
   let retryDelay = 500;
   let nextTimer = null;
-  let attemptCount = 0;
   let nextTargetTime = null;
-  let tokenRefreshInterval = null; // <-- Manages the page reload timer
+  let attemptCount = 0;
+  let latencyList = [];
 
-  // UI refs
-  let clockDisplay, countdownLabel, skipButton, logArea, visaSelect, retryDelayInput, tokenRefreshInput, timeContainer, attemptCounterLabel;
-  let startBtn, stopBtn; // <-- Made global for auto-start
+  let clockDisplay, countdownLabel, attemptCounterLabel, latencyLabel, logArea;
+  let visaSelect, retryDelayInput, tokenRefreshInput, timeContainer;
+  let startBtn, stopBtn, sendNowBtn, skipBtn;
 
-  // ================== 🔊 Sounds ==================
- const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-
-function playSound(type) {
-  try {
-    const osc = audioCtx.createOscillator();
-    const gain = audioCtx.createGain();
-    osc.type = 'square';
-    osc.frequency.value = type === 'tik' ? 800 : 500;
-    gain.gain.value = 0.1;
-    osc.connect(gain);
-    gain.connect(audioCtx.destination);
-    osc.start();
-    osc.stop(audioCtx.currentTime + 0.08);
-  } catch (_) {}
-}
-
-  function playTerara() {
-    try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const gain = ctx.createGain();
-      gain.connect(ctx.destination);
-      const notes = [{ f: 880, d: 0.25 }, { f: 988, d: 0.25 }, { f: 1046, d: 0.5 }];
-      let t = ctx.currentTime;
-      notes.forEach(note => {
-        const osc = ctx.createOscillator();
-        osc.type = "sine";
-        osc.frequency.value = note.f;
-        osc.connect(gain);
-        gain.gain.setValueAtTime(0.25, t);
-        gain.gain.exponentialRampToValueAtTime(0.0001, t + note.d);
-        osc.start(t);
-        osc.stop(t + note.d);
-        t += note.d;
-      });
-    } catch (e) { console.warn('🎵 Sound failed:', e); }
-  }
-
-  // ================== 🧾 Log ==================
-function log(msg) {
-  const nowDate = new Date();
-  const nowStr = nowDate.toLocaleTimeString('en-GB', { hour12: false }) + ':' +
-                 String(nowDate.getMilliseconds()).padStart(3, '0');
-  const line = `[${nowStr}] ${msg}`;
-
-  if (logArea) {
-    // Only keep last 200 lines (prevents textarea slowdown)
-    const lines = logArea.value.split('\n');
-    if (lines.length > 200) lines.shift();
-    logArea.value = [...lines, line].join('\n');
-    logArea.scrollTop = logArea.scrollHeight;
-  } else {
-    console.log(line);
-  }
-}
-
-  function saveSettings() {
-    const times = Array.from(timeContainer.querySelectorAll('.time-row')).map(row => {
-      const [t, r] = row.querySelectorAll('input');
-      return { time: t.value, retry: r.value };
-    });
-    const data = {
-      visa: visaSelect.value,
-      retryDelay: retryDelayInput.value,
-      tokenRefresh: tokenRefreshInput.value,
-      times
-    };
-    localStorage.setItem('visaScheduler', JSON.stringify(data));
-  }
-  // ================== 📡 API Request ==================
-  async function sendApiRequest(visaType, retriesLeft) {
-    playSound('tik');
-    const apiUrl = apiUrls[visaType];
-    attemptCount++;
-    updateAttemptCounter();
-    log(`📡 Attempt #${attemptCount}: Sending request for ${visaType} (Retries left: ${retriesLeft})`);
-
-    try {
-      const response = await fetch(apiUrl, {
-        method: 'GET',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      });
-      const text = (await response.text()).trim();
-      playSound('tok');
-      const isTrue = text === 'true';
-      log(`[${visaType}] ➜ API Response: ${isTrue ? '✅ TRUE' : '❌ FALSE'}`);
-
-      if (isTrue) {
-        log('✅ Appointment FOUND! Hunting stopped.');
-        isRunning = false;
-        clearTimeout(nextTimer);
-        // ==================
-        // <-- FIX: Clear auto-reload timer and flag on success
-        // ==================
-        clearInterval(tokenRefreshInterval);
-        localStorage.removeItem('hunterWasRunning');
-
-        playTerara();
-        const alarm = setInterval(playTerara, 3000);
-        skipButton.disabled = false;
-        skipButton.style.background = '#ffc107';
-
-        const alertBox = document.createElement('div');
-        alertBox.style.cssText = `
-          position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
-          background:white;border:3px solid #28a745;padding:20px;
-          border-radius:10px;z-index:999999;text-align:center;
-          box-shadow:0 0 20px rgba(0,0,0,0.4);
-        `;
-        alertBox.innerHTML = `
-          <h2 style="color:#28a745">✅ Appointment Available!</h2>
-          <p>Please fill required data, then click <b>SKIP</b> manually.</p>
-          <button id="okAlarm" style="background:#007bff;color:white;border:none;padding:8px 15px;border-radius:5px;cursor:pointer;">OK (Stop Alarm)</button>
-        `;
-        document.body.appendChild(alertBox);
-        document.getElementById('okAlarm').onclick = () => {
-          clearInterval(alarm);
-          alertBox.remove();
-          log('🔕 Alarm stopped by user.');
-        };
-      } else {
-        if (retriesLeft > 0) {
-          log(`🔁 Retrying... (${retriesLeft - 1} left)`);
-          setTimeout(() => sendApiRequest(visaType, retriesLeft - 1), retryDelay);
-        } else {
-          log('❌ No slot found. Moving to next scheduled timing.');
-          scheduleNext(visaType);
-        }
-      }
-    } catch (err) {
-      log(`⚠️ Error: ${err}`);
-      scheduleNext(visaType);
-    }
-  }
-
-  // ================== 🧮 Misc ==================
-  function updateAttemptCounter() {
-    if (attemptCounterLabel) attemptCounterLabel.textContent = `Attempts: ${attemptCount}`;
-  }
-
-let apiHeaders = null;
-
-function retrieveToken() {
-  token = sessionStorage.getItem('access_token') ||
-          document.cookie.split(';').find(c => c.trim().startsWith('access_token='))?.split('=')[1];
-
-  apiHeaders = {
-    Authorization: `Bearer ${token}`,
-    'Content-Type': 'application/json'
-  };
-
-  log('🔑 Token retrieved');
-}
-
-  // ==================
-  // <-- FIX: This function now reloads the entire page.
-  // ==================
-
-
-function autoReloadForToken(intervalMin) {
-  if (tokenRefreshInterval) clearInterval(tokenRefreshInterval);
-  const interval = intervalMin * 60 * 1000;
-
-  log(`🔄 Page will reload to refresh token in ${intervalMin} min.`);
-
-  tokenRefreshInterval = setInterval(() => {
-    log('⏳ Reloading page to refresh token...');
-
-    const overlay = document.createElement('div');
-    overlay.style.cssText = `
-      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-      background: rgba(0,0,0,0.75); color: white;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 24px; font-weight: bold; z-index: 9999999;
-    `;
-    overlay.textContent = '🔄 Refreshing session...';
-    document.body.appendChild(overlay);
-
-    // Small delay so overlay is visible before reload happens
-    setTimeout(() => {
-      location.reload();
-    }, 600);
-
-  }, interval);
-}
-
-autoReloadForToken(6); // example// example
-  // ==================
-  // <-- FIX: Scheduler logic updated to loop every minute.
-  // ==================
-  function findNextTiming(times) {
-    const now = new Date();
-    const currentMs = now.getMinutes() * 60000 + now.getSeconds() * 1000 + now.getMilliseconds();
-    const list = times.map(t => {
-      const [mm, ss, ms, retry] = t;
-      return { mm, ss, ms, retry, total: mm * 60000 + ss * 1000 + ms };
-    }).sort((a, b) => a.total - b.total);
-    return list.find(x => x.total > currentMs) || null;
-  }
-
-
-
-function scheduleNext(visaType) {
-  if (!isRunning) return;
-  const next = findNextTiming(schedule);
-  if (!next) {
-    log('✅ No more scheduled times.');
-    isRunning = false;
-    nextTargetTime = null;
-    return;
-  }
-  const now = new Date();
-  const nextTarget = new Date(now);
-  nextTarget.setMinutes(next.mm);
-  nextTarget.setSeconds(next.ss);
-  nextTarget.setMilliseconds(next.ms);
-  let delay = nextTarget - now;
-  if (delay < 0) delay += 60000;
-
-  nextTargetTime = nextTarget; // 🕒 set global for countdown
-  log(`⏳ Next request at ${next.mm}:${next.ss}:${next.ms} (in ${delay} ms, retry ${next.retry})`);
-
-  clearTimeout(nextTimer);
-  nextTimer = setTimeout(() => sendApiRequest(visaType, next.retry), delay);
-}
-
-  // ================== 🌍 API URLs ==================
-  const apiUrls = {
+const apiUrls = {
     'لم شمل الوالدين (D) - القاهرة': 'https://egyapi.almaviva-visa.it/reservation-manager/api/planning/v1/checks?officeId=1&visaId=19&serviceLevelId=1',
     'لم شمل الوالدين (D) - الاسكندريه': 'https://egyapi.almaviva-visa.it/reservation-manager/api/planning/v1/checks?officeId=1&visaId=19&serviceLevelId=1',
     'لم شمل الأزواج (D) - القاهرة': 'https://egyapi.almaviva-visa.it/reservation-manager/api/planning/v1/checks?officeId=1&visaId=18&serviceLevelId=1',
@@ -261,368 +34,400 @@ function scheduleNext(visaType) {
     'رجال الأعمال (C) - القاهرة': 'https://egyapi.almaviva-visa.it/reservation-manager/api/planning/v1/checks?officeId=1&visaId=5&serviceLevelId=1',
     'سياحة (C) - القاهرة': 'https://egyapi.almaviva-visa.it/reservation-manager/api/planning/v1/checks?officeId=1&visaId=1&serviceLevelId=1',
     'سياحة (C) - الاسكندريه': 'https://egyapi.almaviva-visa.it/reservation-manager/api/planning/v1/checks?officeId=2&visaId=1&serviceLevelId=1',
-    'Re-Entry (C) - Cairo': 'https://egyapi.almaviva-visa.it/reservation-manager/api/planning/v1/checks?officeId=1&visaId=4&serviceLevelId=1',
-     'Re-Entry (C) - ALEX': 'https://egyapi.almaviva-visa.it/reservation-manager/api/planning/v1/checks?officeId=2&visaId=4&serviceLevelId=1'
+    'Re-Entry (C) - Cairo': 'https://egyapi.almaviva-visa.it/reservation-manager/api/planning/v1/checks?officeId=1&visaId=4&serviceLevelId=1'
   };
+
+
+  const beep = (f) => {
+    try {
+      const ctx = new AudioContext();
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = 'square';
+      o.connect(g);
+      g.connect(ctx.destination);
+      o.frequency.value = f;
+      g.gain.setValueAtTime(0.05, ctx.currentTime);
+      o.start();
+      o.stop(ctx.currentTime + 0.1);
+    } catch {}
+  };
+
+  const playAlarm = () => {
+    try {
+      const ctx = new AudioContext();
+      const g = ctx.createGain();
+      g.connect(ctx.destination);
+      [800, 1000, 1200].forEach((f, i) => {
+        const o = ctx.createOscillator();
+        o.type = 'sine';
+        o.frequency.value = f;
+        o.connect(g);
+        o.start(ctx.currentTime + i * 0.25);
+        o.stop(ctx.currentTime + (i + 1) * 0.25);
+      });
+    } catch {}
+  };
+
+  const log = (msg) => {
+    const t = new Date();
+    const ts = `${t.toLocaleTimeString('en-GB', { hour12: false })}:${String(t.getMilliseconds()).padStart(3, '0')}`;
+    const line = `[${ts}] ${msg}`;
+    if (logArea) {
+      logArea.value += line + '\n';
+      logArea.scrollTop = logArea.scrollHeight;
+    }
+    console.log(line);
+  };
+
+  const retrieveToken = () => {
+    token =
+      sessionStorage.getItem('access_token') ||
+      document.cookie.split(';').find((c) => c.trim().startsWith('access_token='))?.split('=')[1] ||
+      '';
+    log(`🔑 Token ${token ? 'retrieved' : 'missing'}`);
+  };
+
+  const saveSettings = () => {
+    const times = Array.from(timeContainer.querySelectorAll('.time-row')).map((r) => {
+      const [t, rty] = r.querySelectorAll('input');
+      return { time: t.value, retry: rty.value };
+    });
+    const data = {
+      visa: visaSelect.value,
+      retryDelay: retryDelayInput.value,
+      tokenRefresh: tokenRefreshInput.value,
+      times,
+    };
+    localStorage.setItem('visaScheduler', JSON.stringify(data));
+  };
+
+  async function sendApiRequest(visaType, retriesLeft) {
+    beep(600);
+    attemptCount++;
+    attemptCounterLabel.textContent = `Attempts: ${attemptCount}`;
+    log(`📡 Attempt #${attemptCount} for ${visaType}`);
+
+    const url = apiUrls[visaType];
+    if (!url) return log(`⚠️ No API URL found for ${visaType}`);
+
+    const startTime = performance.now();
+    try {
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+      const txt = (await res.text()).trim();
+      const latency = performance.now() - startTime;
+      latencyList.push(latency);
+      const avg = latencyList.reduce((a, b) => a + b, 0) / latencyList.length;
+      latencyLabel.textContent = `⚡ Avg Latency: ${avg.toFixed(2)} ms`;
+
+      log(`📥 Response (${latency.toFixed(1)}ms): ${txt}`);
+
+      if (txt === 'true') {
+        log('✅ Appointment FOUND!');
+        playAlarm();
+        skipBtn.disabled = false;
+        skipBtn.style.background = '#ffc107';
+        alert('✅ Appointment found!');
+        isRunning = false;
+        clearTimeout(nextTimer);
+      } else if (retriesLeft > 0) {
+        setTimeout(() => sendApiRequest(visaType, retriesLeft - 1), retryDelay);
+      } else {
+        scheduleNext(visaType);
+      }
+    } catch (e) {
+      log(`⚠️ Request error: ${e}`);
+      scheduleNext(visaType);
+    }
+  }
+
+
+
+  function findNextTiming(times) {
+    const now = new Date();
+    const currentMs = now.getMinutes() * 60000 + now.getSeconds() * 1000 + now.getMilliseconds();
+    const sorted = times
+      .map(([mm, ss, ms, r]) => ({
+        mm,
+        ss,
+        ms,
+        r,
+        total: mm * 60000 + ss * 1000 + ms,
+      }))
+      .sort((a, b) => a.total - b.total);
+    return sorted.find((t) => t.total > currentMs) || sorted[0];
+  }
+  function performPageSkip() {
+    try {
+      const skipEl = document.getElementsByClassName('visasys-button w-72')[2];
+      if (skipEl) { skipEl.disabled = false; skipEl.click(); appendLog('⏩ Page SKIP clicked'); return true; }
+      // try alternate selectors
+      const btn = document.querySelector('button.skip, button[data-action="skip"], input[value="SKIP"]');
+      if (btn) { btn.disabled=false; btn.click(); appendLog('⏩ Page SKIP (alternate) clicked'); return true; }
+    } catch (e) { appendLog('⚠ skip click failed: '+e); }
+    appendLog('⛔ Skip button not found on page');
+    return false;
+  }
+
+
+  function scheduleNext(visaType) {
+    if (!isRunning) return;
+    const next = findNextTiming(schedule);
+    const now = new Date();
+
+    // Compute time within the current HOUR (instead of minute)
+    const nextTime = new Date(now);
+    nextTime.setMinutes(next.mm);
+    nextTime.setSeconds(next.ss);
+    nextTime.setMilliseconds(next.ms);
+    if (nextTime <= now) nextTime.setHours(nextTime.getHours() + 1);
+
+    nextTargetTime = nextTime;
+    const delay = nextTime - now;
+
+    log(`⏳ Next request scheduled in ${(delay / 1000).toFixed(2)}s`);
+    clearTimeout(nextTimer);
+    nextTimer = setTimeout(() => sendApiRequest(visaType, next.r), delay);
+  }
 
   function updateClock() {
     const now = new Date();
-    const hh = now.getHours().toString().padStart(2, '0');
-    const mm = now.getMinutes().toString().padStart(2, '0');
-    const ss = now.getSeconds().toString().padStart(2, '0');
-    const ms = now.getMilliseconds().toString().padStart(3, '0');
-    if (clockDisplay) clockDisplay.textContent = `🕒 ${hh}:${mm}:${ss}:${ms}`;
-
-    if (countdownLabel && nextTargetTime) {
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    const ss = String(now.getSeconds()).padStart(2, '0');
+    const ms = String(now.getMilliseconds()).padStart(3, '0');
+    clockDisplay.textContent = `🕒 ${hh}:${mm}:${ss}:${ms}`;
+    if (nextTargetTime) {
       const diff = nextTargetTime - now;
-      if (diff > 0) {
-        const s = (diff / 1000).toFixed(2);
-        countdownLabel.textContent = `⏳ Next in ${s}s`;
-      } else {
-        countdownLabel.textContent = `⚡ Executing...`;
-      }
-    }
-    // ==================
-    // <-- FIX: Update token countdown label
-    // ==================
-    if (tokenRefreshInput && nextTokenRefreshTime) {
-        const diff2 = nextTokenRefreshTime - now;
-        // This label doesn't exist in your v19.5, but if it did, this is how it would work
-        // For now, it just calculates in the background.
+      countdownLabel.textContent =
+        diff > 0 ? `⏳ Next in ${(diff / 1000).toFixed(2)}s` : `⚡ Executing...`;
     }
   }
-  // ================== 🧰 UI ==================
-  // ================== 🧰 UI ==================
+
   function createUI() {
-    // ==================
-    // <-- NEW: First-run check logic
-    // ==================
-    const firstRunFlag = 'yallaVisa_v19_6_init'; // Flag specific to this version
-    const isFirstRun = !localStorage.getItem(firstRunFlag);
-    let saved = {}; // Start with an empty object
-
-    if (isFirstRun) {
-      // This is the first time v19.6 is running.
-      log('✨ First run of v19.6. Loading default settings.');
-
-      // Clear any old settings from previous versions
-      localStorage.removeItem('visaScheduler');
-
-      // Set the flag so this block doesn't run again
-      localStorage.setItem(firstRunFlag, 'true');
-
-      // 'saved' remains '{}', which will force all defaults to load
-    } else {
-      // Not the first time, load saved data as usual.
-      saved = JSON.parse(localStorage.getItem('visaScheduler') || '{}');
-    }
-    // ==================
-    // <-- END NEW
-    // ==================
-
-    // const saved = JSON.parse(localStorage.getItem('visaScheduler') || '{}'); // <-- OLD LINE (REPLACED)
+    if (document.getElementById('yallaVisaPanel')) return;
+    const saved = JSON.parse(localStorage.getItem('visaScheduler') || '{}');
 
     const panel = document.createElement('div');
-    panel.id = 'yallaVisaPanel'; // <-- ADD THIS LINE
+    panel.id = 'yallaVisaPanel';
     panel.style.cssText = `
       position:fixed;top:80px;left:20px;width:380px;
-      background:#f8f9fa;border:2px solid #007bff;border-radius:6px;
-      padding:10px;z-index:99999;resize:both;overflow:auto;
-      box-shadow:0 0 8px rgba(0,0,0,0.3);
+      background:rgba(255,255,255,0.9);
+      border-radius:12px;
+      backdrop-filter:blur(10px);
+      border:1px solid #007bff;
+      box-shadow:0 6px 16px rgba(0,0,0,0.25);
+      font-family:'Segoe UI',sans-serif;
+      z-index:999999;
+      transition:all 0.3s ease;
     `;
 
-    // HEADER
+    // Header
     const header = document.createElement('div');
     header.style.cssText = `
       display:flex;justify-content:space-between;align-items:center;
-      background:#007bff;color:white;padding:5px 8px;font-weight:bold;
-      border-radius:4px;margin-bottom:6px;cursor:move;
+      background:#007bff;color:white;padding:8px 12px;
+      font-weight:bold;cursor:move;border-radius:12px 12px 0 0;
     `;
-
     const title = document.createElement('span');
-    title.textContent = '✈️ Yalla-Visa Hunter ✈️';
+    title.textContent = '✈️ Yalla-Visa Hunter v20.6';
     header.appendChild(title);
 
-    // Controls container (right side)
-    const headerControls = document.createElement('div');
-    headerControls.style.cssText = 'display:flex;gap:4px;';
-
-    // ➖ Minimize button
+    const buttonsDiv = document.createElement('div');
     const minimizeBtn = document.createElement('button');
     minimizeBtn.textContent = '–';
-    minimizeBtn.title = 'Minimize / Expand Panel';
-    minimizeBtn.style.cssText = `
-      background:#ffc107;
-      border:none;
-      border-radius:4px;
-      width:25px;
-      height:25px;
-      cursor:pointer;
-    `;
-
-    // 🗑 Reset button
+    minimizeBtn.style.cssText =
+      'background:#ffc107;border:none;border-radius:4px;width:24px;height:24px;margin-right:4px;cursor:pointer;';
     const resetBtn = document.createElement('button');
     resetBtn.textContent = '🗑';
-    resetBtn.title = 'Reset & Clear Saved Data';
-    resetBtn.style.cssText = `
-      background:#dc3545;
-      border:none;
-      border-radius:4px;
-      width:25px;
-      height:25px;
-      cursor:pointer;
-      color:white;
-    `;
+    resetBtn.style.cssText =
+      'background:#dc3545;color:white;border:none;border-radius:4px;width:24px;height:24px;cursor:pointer;';
+    buttonsDiv.append(minimizeBtn, resetBtn);
+    header.appendChild(buttonsDiv);
+    panel.appendChild(header);
 
-    // 🔄 Reset logic
+    const content = document.createElement('div');
+    content.style.cssText = 'padding:10px;';
+    panel.appendChild(content);
+
+    // Draggable
+    let dragging = false,
+      offsetX = 0,
+      offsetY = 0;
+    header.addEventListener('mousedown', (e) => {
+      dragging = true;
+      offsetX = e.clientX - panel.offsetLeft;
+      offsetY = e.clientY - panel.offsetTop;
+    });
+    document.addEventListener('mouseup', () => (dragging = false));
+    document.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      panel.style.left = e.clientX - offsetX + 'px';
+      panel.style.top = e.clientY - offsetY + 'px';
+    });
+
+    minimizeBtn.onclick = () => {
+      content.style.display = content.style.display === 'none' ? 'block' : 'none';
+      minimizeBtn.textContent = content.style.display === 'none' ? '+' : '–';
+    };
     resetBtn.onclick = () => {
-      if (confirm('⚠️ Are you sure you want to delete all saved data and reset settings?')) {
+      if (confirm('Clear saved settings?')) {
         localStorage.removeItem('visaScheduler');
-        // ==================
-        // <-- FIX: Clear auto-start flag on reset
-        // ==================
-        localStorage.removeItem('hunterWasRunning');
-        alert('✅ All saved data cleared. Reloading page...');
         location.reload();
       }
     };
 
-    // ➕ Add buttons to header
-    headerControls.append(minimizeBtn, resetBtn);
-    header.appendChild(headerControls);
-    panel.appendChild(header);
-
-    // CONTENT SECTION
-    const content = document.createElement('div');
-    panel.appendChild(content);
-
-    // ➖ Minimize logic
-    let minimized = false;
-    minimizeBtn.onclick = () => {
-      minimized = !minimized;
-
-      if (minimized) {
-        // Collapse everything except the header
-        content.style.display = 'none';
-        panel.style.height = 'auto';
-        panel.style.overflow = 'hidden';
-        panel.style.resize = 'none';
-        minimizeBtn.textContent = '+';
-      } else {
-        // Restore to normal view
-        content.style.display = 'block';
-        panel.style.overflow = 'auto';
-        panel.style.resize = 'both';
-        minimizeBtn.textContent = '–';
-      }
-    };
-
-    // Drag
-    let drag = false, offsetX = 0, offsetY = 0;
-
-    panel.addEventListener('mousedown', e => {
-      if (['INPUT', 'TEXTAREA', 'BUTTON', 'SELECT'].includes(e.target.tagName)) return;
-      drag = true;
-      offsetX = e.clientX - panel.offsetLeft;
-      offsetY = e.clientY - panel.offsetTop;
-      panel.style.cursor = 'grabbing';
-    });
-
-    document.addEventListener('mouseup', () => {
-      drag = false;
-      panel.style.cursor = 'grab';
-    });
-
-    document.addEventListener('mousemove', e => {
-      if (!drag) return;
-      panel.style.left = (e.clientX - offsetX) + 'px';
-      panel.style.top = (e.clientY - offsetY) + 'px';
-    });
-    // Clock + Countdown + Attempts
+    // Core
     clockDisplay = document.createElement('div');
-    clockDisplay.style.cssText = 'font-size:18px;text-align:center;font-weight:bold;color:#007bff;';
+    clockDisplay.style.cssText = 'font-size:18px;text-align:center;color:#007bff;font-weight:bold;';
+    countdownLabel = document.createElement('div');
+    countdownLabel.style.cssText = 'font-size:14px;text-align:center;color:#dc3545;margin-bottom:4px;';
+    attemptCounterLabel = document.createElement('div');
+    attemptCounterLabel.style.cssText = 'text-align:center;font-weight:bold;';
+    latencyLabel = document.createElement('div');
+    latencyLabel.style.cssText = 'text-align:center;color:#28a745;margin-bottom:6px;';
+    latencyLabel.textContent = '⚡ Avg Latency: -- ms';
 
-countdownLabel = document.createElement('div');
-countdownLabel.style.cssText = 'font-size:14px;text-align:center;color:#dc3545;margin-bottom:5px;';
-countdownLabel.textContent = '⏳ Next request: --';
-
-attemptCounterLabel = document.createElement('div');
-attemptCounterLabel.style.cssText = 'text-align:center;margin-bottom:8px;color:#333;font-weight:bold;';
-updateAttemptCounter();
-    // Visa type
+    // Inputs
     visaSelect = document.createElement('select');
-    visaSelect.style.cssText = 'width:100%;padding:5px;margin-bottom:5px;';
-    Object.keys(apiUrls).forEach(k => {
-      const o = document.createElement('option'); o.value = k; o.textContent = k;
+    visaSelect.style.cssText = 'width:100%;padding:6px;margin-bottom:6px;border-radius:6px;';
+    Object.keys(apiUrls).forEach((k) => {
+      const o = document.createElement('option');
+      o.value = k;
+      o.textContent = k;
       visaSelect.appendChild(o);
     });
     visaSelect.value = saved.visa || visaSelect.options[0].value;
 
-    // ===== INPUTS =====
     retryDelayInput = document.createElement('input');
     retryDelayInput.type = 'number';
     retryDelayInput.placeholder = 'Retry Delay (ms)';
     retryDelayInput.value = saved.retryDelay || retryDelay;
-    retryDelayInput.style.cssText = 'width:100%;padding:4px;margin-bottom:5px;';
-    retryDelayInput.oninput = saveSettings;
+    retryDelayInput.style.cssText = 'width:100%;padding:6px;margin-bottom:6px;border-radius:6px;';
 
     tokenRefreshInput = document.createElement('input');
     tokenRefreshInput.type = 'number';
-    // ==================
-    // <-- FIX: Update placeholder text
-    // ==================
-    tokenRefreshInput.placeholder = 'Page Reload Interval (min)';
+    tokenRefreshInput.placeholder = 'Reload Interval (min)';
     tokenRefreshInput.value = saved.tokenRefresh || 5;
-    tokenRefreshInput.style.cssText = 'width:100%;padding:4px;margin-bottom:5px;';
-    tokenRefreshInput.oninput = saveSettings;
+    tokenRefreshInput.style.cssText = 'width:100%;padding:6px;margin-bottom:6px;border-radius:6px;';
 
-    // ===== COLLAPSIBLE TIMERS =====
+    // Timers
     const timerHeader = document.createElement('div');
     timerHeader.innerHTML = '<b>⏱ Timers</b>';
-    timerHeader.style.cssText = 'cursor:pointer;margin:4px 0;padding:4px;background:#e9ecef;border-radius:4px;';
+    timerHeader.style.cssText =
+      'cursor:pointer;margin:4px 0;padding:4px;background:#e9ecef;border-radius:6px;';
     timeContainer = document.createElement('div');
     timeContainer.style.display = 'block';
     timerHeader.onclick = () => {
       timeContainer.style.display = timeContainer.style.display === 'none' ? 'block' : 'none';
     };
 
-  function addTimeRow(time = '', retry = 1) {
+    function addTimeRow(time = '', retry = 1) {
       const row = document.createElement('div');
       row.className = 'time-row';
       row.style.cssText = 'display:flex;align-items:center;margin-bottom:4px;';
       const t = document.createElement('input');
       t.placeholder = 'mm:ss:ms';
       t.value = time;
-      t.style.cssText = 'flex:1;padding:4px;margin-right:4px;';
+      t.style.cssText = 'flex:1;padding:4px;margin-right:4px;border-radius:4px;';
       const r = document.createElement('input');
       r.type = 'number';
       r.value = retry;
-      r.style.cssText = 'width:50px;margin-right:4px;';
+      r.style.cssText = 'width:50px;margin-right:4px;border-radius:4px;';
       const del = document.createElement('button');
       del.textContent = '✖';
-      del.style.cssText = 'background:#dc3545;color:white;border:none;border-radius:4px;cursor:pointer;padding:2px 5px;';
-      del.onclick = () => { row.remove(); saveSettings(); };
-      t.oninput = saveSettings;
-      r.oninput = saveSettings;
+      del.style.cssText =
+        'background:#dc3545;color:white;border:none;border-radius:4px;cursor:pointer;padding:2px 5px;';
+      del.onclick = () => {
+        row.remove();
+        saveSettings();
+      };
       row.append(t, r, del);
       timeContainer.appendChild(row);
     }
 
-
-if (saved.times && saved.times.length) {
-  saved.times.forEach(t => addTimeRow(t.time, t.retry));
-} else {
-  [
-    '00:59:000',
-    '04:59:000',
-    '09:59:000',
-    '14:59:000',
-    '19:59:000',
-    '24:59:000',
-    '29:59:000',
-    '34:59:000',
-    '39:59:000',
-    '44:59:000',
-    '49:59:000',
-    '54:59:000',
-    '59:59:000'
-  ].forEach(t => addTimeRow(t, 1));
-}
+    const defaultTimers = ['00:59:000', '04:59:000', '09:59:000', '14:59:000', '19:59:000'];
+    if (saved.times?.length) saved.times.forEach((t) => addTimeRow(t.time, t.retry));
+    else defaultTimers.forEach((t) => addTimeRow(t, 1));
 
     const addBtn = document.createElement('button');
     addBtn.textContent = '➕ Add Timing';
-    addBtn.style.cssText = 'width:100%;padding:5px;background:#17a2b8;color:white;border:none;border-radius:4px;margin-bottom:5px;';
-    addBtn.onclick = () => { addTimeRow('', 1); saveSettings(); };
+    addBtn.style.cssText =
+      'width:100%;padding:6px;background:#17a2b8;color:white;border:none;border-radius:6px;margin-bottom:6px;';
+    addBtn.onclick = () => {
+      addTimeRow('', 1);
+      saveSettings();
+    };
 
-    // ===== LOGS COLLAPSIBLE =====
+    // Buttons
+    startBtn = document.createElement('button');
+    startBtn.textContent = '▶️ Start Hunting';
+    startBtn.style.cssText =
+      'width:100%;padding:6px;background:#28a745;color:white;border:none;border-radius:6px;margin-bottom:6px;';
+    stopBtn = document.createElement('button');
+    stopBtn.textContent = '⛔ Stop';
+    stopBtn.style.cssText =
+      'width:100%;padding:6px;background:#dc3545;color:white;border:none;border-radius:6px;margin-bottom:6px;';
+    sendNowBtn = document.createElement('button');
+    sendNowBtn.textContent = '⚡ Send Now';
+    sendNowBtn.style.cssText =
+      'width:100%;padding:6px;background:#007bff;color:white;border:none;border-radius:6px;margin-bottom:6px;';
+    skipBtn = document.createElement('button');
+    skipBtn.textContent = '⏩ SKIP';
+    skipBtn.style.cssText =
+      'width:100%;padding:6px;background:#6c757d;color:white;border:none;border-radius:6px;margin-bottom:6px;';
+    skipBtn.disabled = true;
+
+    startBtn.onclick = () => {
+      if (isRunning) return alert('Already running!');
+      const rows = Array.from(timeContainer.querySelectorAll('.time-row')).map((r) => {
+        const [t, rty] = r.querySelectorAll('input');
+        const [mm, ss, ms] = t.value.split(':').map(Number);
+        return [mm, ss, ms, Number(rty.value) || 0];
+      });
+      if (!rows.length) return alert('Add valid timers.');
+      schedule = rows;
+      attemptCount = 0;
+      latencyList = [];
+      retryDelay = parseInt(retryDelayInput.value) || 500;
+      isRunning = true;
+      skipBtn.disabled = true;
+      skipBtn.style.background = '#6c757d';
+      log(`🎯 Started hunting ${visaSelect.value}`);
+      scheduleNext(visaSelect.value);
+    };
+
+    stopBtn.onclick = () => {
+      isRunning = false;
+      clearTimeout(nextTimer);
+      log('🛑 Stopped.');
+    };
+
+    sendNowBtn.onclick = () => sendApiRequest(visaSelect.value, 0);
+
+    skipBtn.onclick = () => {
+      log('➡️ Manual Skip clicked');
+      const el = document.querySelector('.visasys-button.w-72:nth-of-type(3)');
+      if (el) el.click();
+    };
+
     const logHeader = document.createElement('div');
-    logHeader.innerHTML = '<b>🪵 Logs</b>';
-    logHeader.style.cssText = 'cursor:pointer;margin:4px 0;padding:4px;background:#e9ecef;border-radius:4px;';
-    logArea = document.createElement('textarea');
-    logArea.style.cssText = 'width:100%;height:150px;background:black;color:#0f0;font-size:12px;padding:5px;border-radius:4px;';
+    logHeader.textContent = '🪵 Logs';
+    logHeader.style.cssText =
+      'cursor:pointer;margin:4px 0;padding:4px;background:#e9ecef;border-radius:6px;';
+     logArea = document.createElement('textarea');
+    logArea.style.cssText =
+      'width:100%;height:150px;background:black;color:#0f0;font-size:12px;padding:5px;border-radius:6px;';
     logHeader.onclick = () => {
       logArea.style.display = logArea.style.display === 'none' ? 'block' : 'none';
     };
 
-    // ===== BUTTONS =====
-    startBtn = document.createElement('button'); // <-- Assign to global
-    startBtn.textContent = '▶️ Start Hunting';
-    startBtn.style.cssText = 'width:100%;padding:6px;background:#28a745;color:white;border:none;border-radius:4px;margin-bottom:5px;';
-    startBtn.onclick = () => {
-      if (isRunning) return alert('Already running.');
-
-      // ==================
-      // <-- FIX: Robust filter for empty/invalid timings
-      // ==================
-      const times = Array.from(timeContainer.querySelectorAll('.time-row'))
-        .map(r => {
-          const [t, rty] = r.querySelectorAll('input');
-          return { timeStr: t.value, retryVal: Number(rty.value) || 0 };
-        })
-        .filter(t => t.timeStr && t.timeStr.includes(':')) // Filter out empty/invalid
-        .map(t => {
-          const [mm, ss, ms] = t.timeStr.split(':').map(Number);
-          return [mm, ss, ms, t.retryVal];
-        });
-
-      if (!times.length) {
-        alert('Please add at least one valid timing (mm:ss:ms).');
-        return;
-      }
-
-      schedule = times;
-      attemptCount = 0;
-      updateAttemptCounter();
-      retryDelay = parseInt(retryDelayInput.value) || 500;
-
-      // ==================
-      // <-- FIX: Start PAGE RELOAD timer and set auto-start flag
-      // ==================
-      autoReloadForToken(parseInt(tokenRefreshInput.value) || 5);
-      localStorage.setItem('hunterWasRunning', 'true');
-
-      isRunning = true;
-      skipButton.disabled = true;
-      skipButton.style.background = '#6c757d';
-      log(`🎯 Started hunting ${visaSelect.value}`);
-      saveSettings();
-      scheduleNext(visaSelect.value);
-    };
-
-    stopBtn = document.createElement('button'); // <-- Assign to global
-    stopBtn.textContent = '⛔ Stop';
-    stopBtn.style.cssText = 'width:100%;padding:6px;background:#dc3545;color:white;border:none;border-radius:4px;margin-bottom:5px;';
-    stopBtn.onclick = () => {
-      isRunning = false;
-      clearTimeout(nextTimer);
-      // ==================
-      // <-- FIX: Clear reload timer and auto-start flag
-      // ==================
-      clearInterval(tokenRefreshInterval);
-      localStorage.removeItem('hunterWasRunning');
-      log('⛔ Hunting stopped.');
-    };
-
-    const sendNow = document.createElement('button');
-    sendNow.textContent = '⚡ Send Now';
-    sendNow.style.cssText = 'width:100%;padding:6px;background:#007bff;color:white;border:none;border-radius:4px;margin-bottom:5px;';
-    sendNow.onclick = () => sendApiRequest(visaSelect.value, 0);
-
-    skipButton = document.createElement('button');
-    skipButton.textContent = '⏩ SKIP';
-    skipButton.style.cssText = 'width:100%;padding:6px;background:#6c757d;color:white;border:none;border-radius:4px;margin-bottom:5px;';
-    skipButton.disabled = true;
-    skipButton.onclick = () => {
-      log('➡️ Manual Skip Injected');
-      const skip = document.getElementsByClassName('visasys-button w-72')[2];
-      if (skip) { skip.disabled = false; skip.click(); }
-    };
-
-    // ===== APPEND CONTENT =====
+    // Append everything neatly
     content.append(
       clockDisplay,
       countdownLabel,
       attemptCounterLabel,
+      latencyLabel,
       visaSelect,
       retryDelayInput,
       tokenRefreshInput,
@@ -631,28 +436,39 @@ if (saved.times && saved.times.length) {
       addBtn,
       startBtn,
       stopBtn,
-      sendNow,
-      skipButton,
+      sendNowBtn,
+      skipBtn,
       logHeader,
       logArea
     );
 
     document.body.appendChild(panel);
-    setInterval(updateClock, 200);
+
+    // ⏰ Live clock update
+    setInterval(updateClock, 50);
+
+    // 💾 Auto-save for every change
+    [visaSelect, retryDelayInput, tokenRefreshInput].forEach((el) => {
+      el.addEventListener('change', saveSettings);
+      el.addEventListener('input', saveSettings);
+    });
   }
 
-  // ================== 🚀 Init ==================
-  // ================== 🚀 Init ==================
-
-  /**
-   * Main function to build the UI and start the script.
-   * This is now 'idempotent', meaning it can be called multiple times
-   * without creating duplicate UIs.
-   */
-     window.addEventListener('load', () => {
+  // 🚀 Initialize UI + Restore state
+  function initializeScript() {
     retrieveToken();
     createUI();
+    log('✨ Ready: Yalla-Visa v20.6 — Fixed Timer + Latency Monitor + Persistent Settings');
+  }
 
-    log('✨ Ready: Stable Visa Scheduler v19.7 — Auto Token Refresh (8 min)');
+  window.addEventListener('load', initializeScript);
+
+  // 🧩 Keep UI alive after SPA reload or token refresh
+  const observer = new MutationObserver(() => {
+    if (!document.getElementById('yallaVisaPanel')) {
+      log('♻️ UI missing, restoring...');
+      initializeScript();
+    }
   });
+  observer.observe(document.documentElement, { childList: true, subtree: true });
 })();
